@@ -161,6 +161,23 @@ class Trainer:
         :raises NotImplementedError: Not implemented
         """
         raise NotImplementedError
+    
+    def _print_episode_log(self, episode_count: int, timestep: int, episode_reward: float, best_episode_reward: float) -> None:
+
+        log_lines = [
+            f"Episode: {episode_count+1}",
+            f"Tiemstep: {timestep+1}",
+            f"Reward: {episode_reward:.2f}",
+            f"Best Reward: {best_episode_reward:.2f}",
+        ]
+
+        max_len = max(len(line) for line in log_lines)
+        border = "+" + "-" * (max_len + 2) + "+"
+
+        tqdm.tqdm.write(border)
+        for line in log_lines:
+            tqdm.tqdm.write("| " + line.ljust(max_len) + " |")
+        tqdm.tqdm.write(border)
 
     def single_agent_train(self) -> None:
         """Train agent
@@ -178,6 +195,11 @@ class Trainer:
         assert self.num_simultaneous_agents == 1, "This method is not allowed for simultaneous agents"
         assert self.env.num_agents == 1, "This method is not allowed for multi-agents"
 
+        # Episode tracking variables
+        episode_reward = 0.0
+        episode_count = 0
+        best_episode_reward = -float("inf")
+
         # reset env
         states, infos = self.env.reset()
 
@@ -194,6 +216,9 @@ class Trainer:
 
                 # step the environments
                 next_states, rewards, terminated, truncated, infos = self.env.step(actions)
+
+                # accumulate reward (for single agent, rewards is a 1-element tensor)
+                episode_reward += rewards.mean().item()
 
                 # render scene
                 if not self.headless:
@@ -224,6 +249,12 @@ class Trainer:
             # reset environments
             if self.env.num_envs > 1:
                 states = next_states
+                if truncated.all():
+                    if episode_reward > best_episode_reward:
+                        best_episode_reward = episode_reward
+                    self._print_episode_log(episode_count, timestep, episode_reward, best_episode_reward)
+                    episode_reward = 0
+                    episode_count += 1
             else:
                 if terminated.any() or truncated.any():
                     with torch.no_grad():

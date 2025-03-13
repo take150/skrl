@@ -60,7 +60,7 @@ class IsaacLabWrapper(Wrapper):
         """
         actions = unflatten_tensorized_space(self.action_space, actions)
         observations, reward, terminated, truncated, self._info = self._env.step(actions)
-        self._observations = flatten_tensorized_space(tensorize_space(self.observation_space, observations["policy"]))
+        self._observations = flatten_tensorized_space(tensorize_space(self.observation_space, observations))
         return self._observations, reward.view(-1, 1), terminated.view(-1, 1), truncated.view(-1, 1), self._info
 
     def reset(self) -> Tuple[torch.Tensor, Any]:
@@ -72,7 +72,7 @@ class IsaacLabWrapper(Wrapper):
         if self._reset_once:
             observations, self._info = self._env.reset()
             self._observations = flatten_tensorized_space(
-                tensorize_space(self.observation_space, observations["policy"])
+                tensorize_space(self.observation_space, observations)
             )
             self._reset_once = False
         return self._observations, self._info
