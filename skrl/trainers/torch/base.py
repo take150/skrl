@@ -2,7 +2,9 @@ from typing import List, Optional, Union
 
 import atexit
 import sys
-import tqdm
+from functools import partial
+from tqdm import tqdm
+tqdm = partial(tqdm, dynamic_ncols=True)
 
 import torch
 
@@ -203,7 +205,7 @@ class Trainer:
         # reset env
         states, infos = self.env.reset()
 
-        for timestep in tqdm.tqdm(
+        for timestep in tqdm(
             range(self.initial_timestep, self.timesteps), disable=self.disable_progressbar, file=sys.stdout
         ):
 
@@ -278,7 +280,7 @@ class Trainer:
         # reset env
         states, infos = self.env.reset()
 
-        for timestep in tqdm.tqdm(
+        for timestep in tqdm(
             range(self.initial_timestep, self.timesteps), disable=self.disable_progressbar, file=sys.stdout
         ):
 
