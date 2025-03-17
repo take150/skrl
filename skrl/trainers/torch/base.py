@@ -2,9 +2,7 @@ from typing import List, Optional, Union
 
 import atexit
 import sys
-from functools import partial
-from tqdm import tqdm
-tqdm = partial(tqdm, dynamic_ncols=True)
+import tqdm
 
 import torch
 
@@ -176,10 +174,10 @@ class Trainer:
         max_len = max(len(line) for line in log_lines)
         border = "+" + "-" * (max_len + 2) + "+"
 
-        tqdm.write(border)
+        tqdm.tqdm.write(border)
         for line in log_lines:
-            tqdm.write("| " + line.ljust(max_len) + " |")
-        tqdm.write(border)
+            tqdm.tqdm.write("| " + line.ljust(max_len) + " |")
+        tqdm.tqdm.write(border)
 
     def single_agent_train(self) -> None:
         """Train agent
@@ -205,8 +203,8 @@ class Trainer:
         # reset env
         states, infos = self.env.reset()
 
-        for timestep in tqdm(
-            range(self.initial_timestep, self.timesteps), disable=self.disable_progressbar, file=sys.stdout
+        for timestep in tqdm.tqdm(
+            range(self.initial_timestep, self.timesteps), disable=self.disable_progressbar, file=sys.stdout, dynamic_ncols=True
         ):
 
             # pre-interaction
@@ -280,8 +278,8 @@ class Trainer:
         # reset env
         states, infos = self.env.reset()
 
-        for timestep in tqdm(
-            range(self.initial_timestep, self.timesteps), disable=self.disable_progressbar, file=sys.stdout
+        for timestep in tqdm.tqdm(
+            range(self.initial_timestep, self.timesteps), disable=self.disable_progressbar, file=sys.stdout, dynamic_ncols=True
         ):
 
             # pre-interaction
