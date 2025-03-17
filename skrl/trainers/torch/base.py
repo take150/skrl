@@ -176,10 +176,10 @@ class Trainer:
         max_len = max(len(line) for line in log_lines)
         border = "+" + "-" * (max_len + 2) + "+"
 
-        tqdm.tqdm.write(border)
+        tqdm.write(border)
         for line in log_lines:
-            tqdm.tqdm.write("| " + line.ljust(max_len) + " |")
-        tqdm.tqdm.write(border)
+            tqdm.write("| " + line.ljust(max_len) + " |")
+        tqdm.write(border)
 
     def single_agent_train(self) -> None:
         """Train agent
