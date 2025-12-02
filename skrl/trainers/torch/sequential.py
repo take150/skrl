@@ -148,6 +148,48 @@ class SequentialTrainer(Trainer):
             else:
                 states = next_states
 
+    def distillation(
+        self,
+        teacher_agent: Agent,
+    ) -> None:
+        """Distill knowledge from teacher agent to student agent
+
+        This method executes the following steps in loop:
+
+        - Pre-interaction
+        - Get teacher predictions from states
+        - Compute student actions
+        - Interact with the environments
+        - Render scene
+        - Record transitions with distillation loss
+        - Post-interaction
+        - Reset environments
+
+        :param teacher_agent: Pre-trained teacher agent
+        :type teacher_agent: skrl.agents.torch.Agent
+        """
+        # set running mode
+        if self.num_simultaneous_agents > 1:
+            for agent in self.agents:
+                agent.set_running_mode("train")
+            
+            for agent in teacher_agent:
+                agent.set_running_mode("eval")
+        else:
+            self.agents.set_running_mode("train")
+            teacher_agent.set_running_mode("eval")
+
+        # non-simultaneous agents
+        if self.num_simultaneous_agents == 1:
+            # single-agent
+            if self.env.num_agents == 1:
+                # Use distillation_loss_weight from config if not provided
+                self.single_agent_distillation(teacher_agent=teacher_agent)
+
+            else:
+                self.multi_agent_distillation(teacher_agent=teacher_agent)
+            return
+
     def eval(self) -> None:
         """Evaluate the agents sequentially
 

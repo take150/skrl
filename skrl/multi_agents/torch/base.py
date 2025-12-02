@@ -62,12 +62,14 @@ class MultiAgent:
             for model in _models.values():
                 if model is not None:
                     model.to(model.device)
-
+            
         self.tracking_data = collections.defaultdict(list)
         self.write_interval = self.cfg.get("experiment", {}).get("write_interval", "auto")
 
         self._track_rewards = collections.deque(maxlen=100)
         self._track_timesteps = collections.deque(maxlen=100)
+        self._track_rewards_agent   = {aid: collections.deque(maxlen=100) for aid in self.possible_agents}
+        self._track_timesteps_agent = {aid: collections.deque(maxlen=100) for aid in self.possible_agents}
         self._cumulative_rewards = None
         self._cumulative_timesteps = None
 
@@ -228,6 +230,9 @@ class MultiAgent:
         # reset data containers for next iteration
         self._track_rewards.clear()
         self._track_timesteps.clear()
+        for aid in self.possible_agents:          
+            self._track_rewards_agent[aid].clear()
+            self._track_timesteps_agent[aid].clear()
         self.tracking_data.clear()
 
     def write_checkpoint(self, timestep: int, timesteps: int) -> None:
@@ -340,8 +345,18 @@ class MultiAgent:
             self._cumulative_rewards = torch.zeros_like(_rewards, dtype=torch.float32)
             self._cumulative_timesteps = torch.zeros_like(_rewards, dtype=torch.int32)
 
+            self._cumulative_rewards_agent = {aid: torch.zeros_like(r, dtype=torch.float32)
+                                          for aid, r in rewards.items()}
+            self._cumulative_timesteps_agent = {aid: torch.zeros_like(r, dtype=torch.int32)
+                                                for aid, r in rewards.items()}
+
+
         self._cumulative_rewards.add_(_rewards)
         self._cumulative_timesteps.add_(1)
+
+        for aid, r in rewards.items():
+            self._cumulative_rewards_agent[aid].add_(r)
+            self._cumulative_timesteps_agent[aid].add_(1)
 
         # check ended episodes
         finished_episodes = (next(iter(terminated.values())) + next(iter(truncated.values()))).nonzero(as_tuple=False)
@@ -355,11 +370,26 @@ class MultiAgent:
             self._cumulative_rewards[finished_episodes] = 0
             self._cumulative_timesteps[finished_episodes] = 0
 
+            for aid in rewards.keys():
+                self._track_rewards_agent[aid].extend(
+                    self._cumulative_rewards_agent[aid][finished_episodes][:, 0].reshape(-1).tolist()
+                )
+                self._track_timesteps_agent[aid].extend(
+                    self._cumulative_timesteps_agent[aid][finished_episodes][:, 0].reshape(-1).tolist()
+                )
+                self._cumulative_rewards_agent[aid][finished_episodes] = 0
+                self._cumulative_timesteps_agent[aid][finished_episodes] = 0
+
         # record data
         if self.write_interval > 0:
             self.tracking_data["Reward / Instantaneous reward (max)"].append(torch.max(_rewards).item())
             self.tracking_data["Reward / Instantaneous reward (min)"].append(torch.min(_rewards).item())
             self.tracking_data["Reward / Instantaneous reward (mean)"].append(torch.mean(_rewards).item())
+
+            for aid, r in rewards.items():
+                self.tracking_data.setdefault(f"Reward / {aid} / Instantaneous (max)", []).append(torch.max(r).item())
+                self.tracking_data.setdefault(f"Reward / {aid} / Instantaneous (min)", []).append(torch.min(r).item())
+                self.tracking_data.setdefault(f"Reward / {aid} / Instantaneous (mean)", []).append(torch.mean(r).item())
 
             if len(self._track_rewards):
                 track_rewards = np.array(self._track_rewards)
@@ -372,6 +402,19 @@ class MultiAgent:
                 self.tracking_data["Episode / Total timesteps (max)"].append(np.max(track_timesteps))
                 self.tracking_data["Episode / Total timesteps (min)"].append(np.min(track_timesteps))
                 self.tracking_data["Episode / Total timesteps (mean)"].append(np.mean(track_timesteps))
+            
+            for aid in rewards.keys():
+                if len(self._track_rewards_agent[aid]):
+                    tr = np.array(self._track_rewards_agent[aid])
+                    ts = np.array(self._track_timesteps_agent[aid])
+
+                    self.tracking_data.setdefault(f"Reward / {aid} / Total (max)", []).append(np.max(tr))
+                    self.tracking_data.setdefault(f"Reward / {aid} / Total (min)", []).append(np.min(tr))
+                    self.tracking_data.setdefault(f"Reward / {aid} / Total (mean)", []).append(np.mean(tr))
+
+                    self.tracking_data.setdefault(f"Episode / {aid} / Timesteps (max)", []).append(np.max(ts))
+                    self.tracking_data.setdefault(f"Episode / {aid} / Timesteps (min)", []).append(np.min(ts))
+                    self.tracking_data.setdefault(f"Episode / {aid} / Timesteps (mean)", []).append(np.mean(ts))
 
     def set_mode(self, mode: str) -> None:
         """Set the model mode (training or evaluation)
@@ -383,6 +426,15 @@ class MultiAgent:
             for model in _models.values():
                 if model is not None:
                     model.set_mode(mode)
+        
+        # for _models in self.models.values():
+        #     if isinstance(_models, dict):
+        #         for model in _models.values():
+        #             if model is not None:
+        #                 model.set_mode(mode)
+        #     else:
+        #         if _models is not None:
+        #             _models.set_mode(mode)  
 
     def set_running_mode(self, mode: str) -> None:
         """Set the current running mode (training or evaluation)

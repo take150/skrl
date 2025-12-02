@@ -1,8 +1,9 @@
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import atexit
 import sys
 import tqdm
+from collections import deque
 
 import torch
 
@@ -71,6 +72,8 @@ class Trainer:
         # setup agents
         self.num_simultaneous_agents = 0
         self._setup_agents()
+
+        # self.values = {uid: self.models[uid].get("value", None) for uid in self.possible_agents}
 
         # register environment closing if configured
         if self.close_environment_at_exit:
@@ -179,6 +182,29 @@ class Trainer:
             tqdm.tqdm.write("| " + line.ljust(max_len) + " |")
         tqdm.tqdm.write(border)
 
+    def _print_episode_log_multi(self, episode_count: int, timestep: int, episode_rewards: Dict[str, float], best_episode_rewards: Dict[str, float]) -> None:
+
+        log_lines = [
+            f"Episode: {episode_count+1}",
+            f"Tiemstep: {timestep+1}",
+            f"Reward: {self._fmt_reward(episode_rewards)}",
+            f"Best Reward: {self._fmt_reward(best_episode_rewards)}",
+        ]
+
+        max_len = max(len(line) for line in log_lines)
+        border = "+" + "-" * (max_len + 2) + "+"
+
+        tqdm.tqdm.write(border)
+        for line in log_lines:
+            tqdm.tqdm.write("| " + line.ljust(max_len) + " |")
+        tqdm.tqdm.write(border)
+
+    def _fmt_reward(self, value):
+        if isinstance(value, dict):
+            return ", ".join(f"{k}: {v:.2f}" for k, v in value.items())
+        else:
+            return f"{value:.2f}"
+        
     def single_agent_train(self) -> None:
         """Train agent
 
@@ -261,6 +287,105 @@ class Trainer:
                         states, infos = self.env.reset()
                 else:
                     states = next_states
+    
+    def single_agent_distillation(
+        self,
+        teacher_agent: Agent,
+    ) -> None:
+        """Distill knowledge from teacher agent to student agent
+
+        This method executes the following steps in loop:
+
+        - Pre-interaction
+        - Get teacher predictions from states
+        - Compute student actions
+        - Interact with the environments
+        - Render scene
+        - Record transitions with distillation loss
+        - Post-interaction
+        - Reset environments
+
+        :param teacher_agent: Pre-trained teacher agent
+        :type teacher_agent: skrl.agents.torch.Agent
+        """
+        assert self.num_simultaneous_agents == 1, "This method is not allowed for simultaneous agents"
+        assert self.env.num_agents == 1, "This method is not allowed for multi-agents"
+
+        # Episode tracking variables
+        episode_reward = 0.0
+        episode_count = 0
+        best_episode_reward = -float("inf")
+
+        # reset env
+        states, infos = self.env.reset()
+
+        for timestep in tqdm.tqdm(
+            range(self.initial_timestep, self.timesteps), disable=self.disable_progressbar, file=sys.stdout, dynamic_ncols=True
+        ):
+
+            # pre-interaction
+            teacher_agent.pre_interaction(timestep=timestep, timesteps=self.timesteps)
+            self.agents.pre_interaction(timestep=timestep, timesteps=self.timesteps)
+
+            with torch.no_grad():
+                # Get teacher predictions from states
+                teacher_actions = teacher_agent.act(states, timestep=timestep, timesteps=self.timesteps)[0]
+
+                # compute student actions
+                actions = self.agents.act(states, timestep=timestep, timesteps=self.timesteps)[0]
+
+                # step the environments
+                next_states, rewards, terminated, truncated, infos = self.env.step(actions)
+
+                # accumulate reward (for single agent, rewards is a 1-element tensor)
+                episode_reward += rewards.mean().item()
+
+                # render scene
+                if not self.headless:
+                    self.env.render()
+
+                # Prepare distillation info for record_transition
+                # Store teacher predictions in infos for distillation loss calculation
+                distillation_infos = infos.copy() if infos else {}
+                distillation_infos["teacher_actions"] = teacher_actions
+
+                # record the environments' transitions
+                self.agents.record_transition(
+                    states=states,
+                    actions=actions,
+                    rewards=rewards,
+                    next_states=next_states,
+                    terminated=terminated,
+                    truncated=truncated,
+                    infos=distillation_infos,
+                    timestep=timestep,
+                    timesteps=self.timesteps,
+                )
+
+                # log environment info
+                if self.environment_info in infos:
+                    for k, v in infos[self.environment_info].items():
+                        if isinstance(v, torch.Tensor) and v.numel() == 1:
+                            self.agents.track_data(f"Info / {k}", v.item())
+
+            # post-interaction
+            self.agents.post_interaction(timestep=timestep, timesteps=self.timesteps)
+
+            # reset environments
+            if self.env.num_envs > 1:
+                states = next_states
+                if truncated.all():
+                    if episode_reward > best_episode_reward:
+                        best_episode_reward = episode_reward
+                    self._print_episode_log(episode_count, timestep, episode_reward, best_episode_reward)
+                    episode_reward = 0
+                    episode_count += 1
+            else:
+                if terminated.any() or truncated.any():
+                    with torch.no_grad():
+                        states, infos = self.env.reset()
+                else:
+                    states = next_states
 
     def single_agent_eval(self) -> None:
         """Evaluate agent
@@ -274,6 +399,11 @@ class Trainer:
         """
         assert self.num_simultaneous_agents == 1, "This method is not allowed for simultaneous agents"
         assert self.env.num_agents == 1, "This method is not allowed for multi-agents"
+
+        # Episode tracking variables
+        episode_reward = 0.0
+        episode_count = 0
+        best_episode_reward = -float("inf")
 
         # reset env
         states, infos = self.env.reset()
@@ -292,23 +422,26 @@ class Trainer:
 
                 # step the environments
                 next_states, rewards, terminated, truncated, infos = self.env.step(actions)
+                
+                # accumulate reward (for single agent, rewards is a 1-element tensor)
+                episode_reward += rewards.mean().item()
 
                 # render scene
                 if not self.headless:
                     self.env.render()
 
                 # write data to TensorBoard
-                self.agents.record_transition(
-                    states=states,
-                    actions=actions,
-                    rewards=rewards,
-                    next_states=next_states,
-                    terminated=terminated,
-                    truncated=truncated,
-                    infos=infos,
-                    timestep=timestep,
-                    timesteps=self.timesteps,
-                )
+                # self.agents.record_transition(
+                #     states=states,
+                #     actions=actions,
+                #     rewards=rewards,
+                #     next_states=next_states,
+                #     terminated=terminated,
+                #     truncated=truncated,
+                #     infos=infos,
+                #     timestep=timestep,
+                #     timesteps=self.timesteps,
+                # )
 
                 # log environment info
                 if self.environment_info in infos:
@@ -322,8 +455,19 @@ class Trainer:
             # reset environments
             if self.env.num_envs > 1:
                 states = next_states
+                if truncated.all():
+                    if episode_reward > best_episode_reward:
+                        best_episode_reward = episode_reward
+                    self._print_episode_log(episode_count, timestep, episode_reward, best_episode_reward)
+                    episode_reward = 0
+                    episode_count += 1
             else:
                 if terminated.any() or truncated.any():
+                    if episode_reward > best_episode_reward:
+                        best_episode_reward = episode_reward
+                    self._print_episode_log(episode_count, timestep, episode_reward, best_episode_reward)
+                    episode_reward = 0
+                    episode_count += 1
                     with torch.no_grad():
                         states, infos = self.env.reset()
                 else:
@@ -345,9 +489,16 @@ class Trainer:
         assert self.num_simultaneous_agents == 1, "This method is not allowed for simultaneous agents"
         assert self.env.num_agents > 1, "This method is not allowed for single-agent"
 
+        episode_rewards = {"robot_1": 0.0, "robot_2": 0.0}
+        episode_count = 0
+        best_episode_rewards = {"robot_1": -float("inf"), "robot_2": -float("inf")}
+
         # reset env
         states, infos = self.env.reset()
         shared_states = self.env.state()
+        # shared_states_1 = shared_states
+        # shared_states_2 = torch.cat([shared_states[:, 20:], shared_states[:, :20]], dim=1)
+                
 
         for timestep in tqdm.tqdm(
             range(self.initial_timestep, self.timesteps), disable=self.disable_progressbar, file=sys.stdout
@@ -358,13 +509,29 @@ class Trainer:
 
             with torch.no_grad():
                 # compute actions
-                actions = self.agents.act(states, timestep=timestep, timesteps=self.timesteps)[0]
+                actions, _, outputs = self.agents.act(states, timestep=timestep, timesteps=self.timesteps)
 
                 # step the environments
                 next_states, rewards, terminated, truncated, infos = self.env.step(actions)
-                shared_next_states = self.env.state()
-                infos["shared_states"] = shared_states
-                infos["shared_next_states"] = shared_next_states
+                # shared_next_states = self.env.state()
+                # infos["shared_states"] = shared_states
+                # infos["shared_next_states"] = shared_next_states
+                # infos["shared_states"] = {}
+                # infos["shared_states"]["robot_1"] = shared_states_1
+                # infos["shared_states"]["robot_2"] = shared_states_2
+                # shared_next_states_1 = shared_next_states
+                # shared_next_states_2 = torch.cat([shared_next_states[:, 20:], shared_next_states[:, :20]], dim=1)
+                # infos["shared_next_states"] = {} 
+                # infos["shared_next_states"]["robot_1"] = shared_next_states_1
+                # infos["shared_next_states"]["robot_2"] = shared_next_states_2
+
+                # for uid in self.agents.possible_agents:
+                #     other_uid = [a for a in self.agents.possible_agents if a != uid][0]
+                #     next_states[uid][:, -256:] = outputs[other_uid]["features"]   
+
+                # accumulate reward (for multi agent, rewards is a 1-element tensor)
+                for id, r in rewards.items():
+                    episode_rewards[id] += r.mean().item()
 
                 # render scene
                 if not self.headless:
@@ -392,6 +559,14 @@ class Trainer:
             # post-interaction
             self.agents.post_interaction(timestep=timestep, timesteps=self.timesteps)
 
+            if truncated["robot_1"].all() and truncated["robot_2"].all():
+                for id, r in episode_rewards.items():
+                    if r > best_episode_rewards[id]:
+                        best_episode_rewards[id] = r
+                self._print_episode_log_multi(episode_count, timestep, episode_rewards, best_episode_rewards)
+                episode_rewards = {"robot_1": 0.0, "robot_2": 0.0}
+                episode_count += 1
+
             # reset environments
             if not self.env.agents:
                 with torch.no_grad():
@@ -399,7 +574,109 @@ class Trainer:
                     shared_states = self.env.state()
             else:
                 states = next_states
-                shared_states = shared_next_states
+                # shared_states = shared_next_states
+                # shared_states_1 = shared_next_states_1
+                # shared_states_2 = shared_next_states_2
+    
+    def multi_agent_distillation(
+        self,
+        teacher_agent: Agent,
+    ) -> None:
+        """Distill knowledge from teacher agent to student agent
+
+        This method executes the following steps in loop:
+
+        - Pre-interaction
+        - Get teacher predictions from states
+        - Compute student actions
+        - Interact with the environments
+        - Render scene
+        - Record transitions with distillation loss
+        - Post-interaction
+        - Reset environments
+
+        :param teacher_agent: Pre-trained teacher agent
+        :type teacher_agent: skrl.agents.torch.Agent
+        """
+        assert self.num_simultaneous_agents == 1, "This method is not allowed for simultaneous agents"
+        assert self.env.num_agents > 1, "This method is not allowed for single-agent"
+
+        episode_rewards = {"robot_1": 0.0, "robot_2": 0.0}
+        episode_count = 0
+        best_episode_rewards = {"robot_1": -float("inf"), "robot_2": -float("inf")}
+
+        # reset env
+        states, infos = self.env.reset()
+        shared_states = self.env.state()       
+
+        for timestep in tqdm.tqdm(
+            range(self.initial_timestep, self.timesteps), disable=self.disable_progressbar, file=sys.stdout
+        ):
+
+            # pre-interaction
+            teacher_agent.pre_interaction(timestep=timestep, timesteps=self.timesteps)
+            self.agents.pre_interaction(timestep=timestep, timesteps=self.timesteps)
+
+            with torch.no_grad():
+                # Get teacher predictions from states
+                teacher_actions = teacher_agent.act(states, timestep=timestep, timesteps=self.timesteps)[0]
+
+                # compute actions
+                actions = self.agents.act(states, timestep=timestep, timesteps=self.timesteps)[0]
+
+                # step the environments
+                next_states, rewards, terminated, truncated, infos = self.env.step(actions)
+                
+                # accumulate reward (for multi agent, rewards is a 1-element tensor)
+                for id, r in rewards.items():
+                    episode_rewards[id] += r.mean().item()
+
+                # render scene
+                if not self.headless:
+                    self.env.render()
+                
+                # Prepare distillation info for record_transition
+                # Store teacher predictions in infos for distillation loss calculation
+                distillation_infos = infos.copy() if infos else {}
+                distillation_infos["teacher_actions"] = teacher_actions
+
+                # record the environments' transitions
+                self.agents.record_transition(
+                    states=states,
+                    actions=actions,
+                    rewards=rewards,
+                    next_states=next_states,
+                    terminated=terminated,
+                    truncated=truncated,
+                    infos=distillation_infos,
+                    timestep=timestep,
+                    timesteps=self.timesteps,
+                )
+
+                # log environment info
+                if self.environment_info in infos:
+                    for k, v in infos[self.environment_info].items():
+                        if isinstance(v, torch.Tensor) and v.numel() == 1:
+                            self.agents.track_data(f"Info / {k}", v.item())
+
+            # post-interaction
+            self.agents.post_interaction(timestep=timestep, timesteps=self.timesteps)
+
+            if truncated["robot_1"].all() and truncated["robot_2"].all():
+                for id, r in episode_rewards.items():
+                    if r > best_episode_rewards[id]:
+                        best_episode_rewards[id] = r
+                self._print_episode_log_multi(episode_count, timestep, episode_rewards, best_episode_rewards)
+                episode_rewards = {"robot_1": 0.0, "robot_2": 0.0}
+                episode_count += 1
+
+            # reset environments
+            if not self.env.agents:
+                with torch.no_grad():
+                    states, infos = self.env.reset()
+                    shared_states = self.env.state()
+            else:
+                states = next_states
 
     def multi_agent_eval(self) -> None:
         """Evaluate multi-agents
@@ -414,9 +691,13 @@ class Trainer:
         assert self.num_simultaneous_agents == 1, "This method is not allowed for simultaneous agents"
         assert self.env.num_agents > 1, "This method is not allowed for single-agent"
 
+        episode_rewards = {"robot_1": 0.0, "robot_2": 0.0}
+        episode_count = 0
+        best_episode_rewards = {"robot_1": -float("inf"), "robot_2": -float("inf")}
+
         # reset env
         states, infos = self.env.reset()
-        shared_states = self.env.state()
+        # shared_states = self.env.state()
 
         for timestep in tqdm.tqdm(
             range(self.initial_timestep, self.timesteps), disable=self.disable_progressbar, file=sys.stdout
@@ -437,25 +718,33 @@ class Trainer:
                 # step the environments
                 next_states, rewards, terminated, truncated, infos = self.env.step(actions)
                 shared_next_states = self.env.state()
-                infos["shared_states"] = shared_states
-                infos["shared_next_states"] = shared_next_states
+                # infos["shared_states"] = shared_states
+                # infos["shared_next_states"] = shared_next_states
+                
+                # for uid in self.agents.possible_agents:
+                #     other_uid = [a for a in self.agents.possible_agents if a != uid][0]
+                #     next_states[uid][:, -256:] = outputs[-1][other_uid]["features"]   
+                
+                # accumulate reward (for multi agent, rewards is a 1-element tensor)
+                for id, r in rewards.items():
+                    episode_rewards[id] += r.mean().item()
 
                 # render scene
                 if not self.headless:
                     self.env.render()
 
                 # write data to TensorBoard
-                self.agents.record_transition(
-                    states=states,
-                    actions=actions,
-                    rewards=rewards,
-                    next_states=next_states,
-                    terminated=terminated,
-                    truncated=truncated,
-                    infos=infos,
-                    timestep=timestep,
-                    timesteps=self.timesteps,
-                )
+                # self.agents.record_transition(
+                #     states=states,
+                #     actions=actions,
+                #     rewards=rewards,
+                #     next_states=next_states,
+                #     terminated=terminated,
+                #     truncated=truncated,
+                #     infos=infos,
+                #     timestep=timestep,
+                #     timesteps=self.timesteps,
+                # )
 
                 # log environment info
                 if self.environment_info in infos:
@@ -465,12 +754,21 @@ class Trainer:
 
             # post-interaction
             super(type(self.agents), self.agents).post_interaction(timestep=timestep, timesteps=self.timesteps)
+            # predicted_values, _, _ = value.act({"states": sampled_states}, role="value")
+
+            if truncated["robot_1"].all() and truncated["robot_2"].all():
+                for id, r in episode_rewards.items():
+                    if r > best_episode_rewards[id]:
+                        best_episode_rewards[id] = r
+                self._print_episode_log_multi(episode_count, timestep, episode_rewards, best_episode_rewards)
+                episode_rewards = {"robot_1": 0.0, "robot_2": 0.0}
+                episode_count += 1
 
             # reset environments
             if not self.env.agents:
                 with torch.no_grad():
                     states, infos = self.env.reset()
-                    shared_states = self.env.state()
+                    # shared_states = self.env.state()
             else:
                 states = next_states
-                shared_states = shared_next_states
+                # shared_states = shared_next_states
