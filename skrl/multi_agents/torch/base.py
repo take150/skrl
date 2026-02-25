@@ -359,7 +359,8 @@ class MultiAgent:
             self._cumulative_timesteps_agent[aid].add_(1)
 
         # check ended episodes
-        finished_episodes = (next(iter(terminated.values())) + next(iter(truncated.values()))).nonzero(as_tuple=False)
+        finished_episodes = next(iter(truncated.values())).nonzero(as_tuple=False)
+        # finished_episodes = (next(iter(terminated.values())) + next(iter(truncated.values()))).nonzero(as_tuple=False)
         if finished_episodes.numel():
 
             # storage cumulative rewards and timesteps
@@ -471,22 +472,89 @@ class MultiAgent:
             modules = torch.load(path, map_location=self.device, weights_only=False)  # prevent torch:FutureWarning
         else:
             modules = torch.load(path, map_location=self.device)
+        
         if type(modules) is dict:
+            is_multi_agent_ckpt = any(uid in modules for uid in self.possible_agents)
             for uid in self.possible_agents:
-                if uid not in modules:
-                    logger.warning(f"Cannot load modules for {uid}. The agent doesn't have such an instance")
-                    continue
-                for name, data in modules[uid].items():
+                if is_multi_agent_ckpt:
+                    # マルチエージェント形式なら、自分のIDのデータを探す
+                    if uid not in modules:
+                        logger.warning(f"Cannot load modules for {uid}...")
+                        continue
+                    source_data = modules[uid]
+                else:
+                    # シングル形式なら、データ全体をそのまま使う（全エージェントで共有）
+                    # これによりシングルで学習した重みが全員にブロードキャストされる
+                    source_data = modules
+                
+                for name, data in source_data.items():
                     module = self.checkpoint_modules[uid].get(name, None)
+                    
                     if module is not None:
-                        if hasattr(module, "load_state_dict"):
-                            module.load_state_dict(data)
+                        # ------------------------------------------------
+                        # 💡 移植箇所: モデル（nn.Module）かどうかの判定 💡
+                        # ------------------------------------------------
+                        is_model = hasattr(module, "state_dict") and any(
+                            isinstance(v, (torch.Tensor, torch.nn.Parameter)) for v in data.values()
+                        )
+
+                        if is_model:
+                            # ------------------------------------------------
+                            # モデルとしてフィルタリング処理を実行
+                            # 形状が一致するものだけをロードする
+                            # ------------------------------------------------
+                            model_dict = module.state_dict()
+                            pretrained_dict_filtered = {
+                                k: v for k, v in data.items()
+                                if k in model_dict and v.shape == model_dict[k].shape
+                            }
+                            
+                            # 現在のモデルの状態に、ロードした有効な重みを上書き
+                            model_dict.update(pretrained_dict_filtered)
+                            
+                            try:
+                                module.load_state_dict(model_dict)
+                            except RuntimeError as e:
+                                logger.warning(f"Error loading filtered state_dict for {uid}:{name}: {e}")
+
                             if hasattr(module, "eval"):
                                 module.eval()
+
+                        elif hasattr(module, "load_state_dict"):
+                            # ------------------------------------------------
+                            # オプティマイザ等としてそのままロード
+                            # ------------------------------------------------
+                            try:
+                                module.load_state_dict(data)
+                            except TypeError as e:
+                                logger.warning(f"Failed to load {uid}:{name} due to argument mismatch: {e}")
+                            except Exception as e:
+                                logger.warning(f"Failed to load {uid}:{name}: {e}")
+
                         else:
                             raise NotImplementedError
                     else:
-                        logger.warning(f"Cannot load the {uid}:{name} module. The agent doesn't have such an instance")
+                        if is_multi_agent_ckpt:
+                            logger.warning(f"Cannot load the {uid}:{name} module. The agent doesn't have such an instance")
+                        else:
+                            # ログレベルを下げる（通常は表示されないレベルにする）
+                            logger.debug(f"Skipped loading {name} for {uid} (Not found in agent modules).")
+        # if type(modules) is dict:
+        #     for uid in self.possible_agents:
+        #         if uid not in modules:
+        #             logger.warning(f"Cannot load modules for {uid}. The agent doesn't have such an instance")
+        #             continue
+        #         for name, data in modules[uid].items():
+        #             module = self.checkpoint_modules[uid].get(name, None)
+        #             if module is not None:
+        #                 if hasattr(module, "load_state_dict"):
+        #                     module.load_state_dict(data)
+        #                     if hasattr(module, "eval"):
+        #                         module.eval()
+        #                 else:
+        #                     raise NotImplementedError
+        #             else:
+        #                 logger.warning(f"Cannot load the {uid}:{name} module. The agent doesn't have such an instance")
 
     def migrate(
         self,

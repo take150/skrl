@@ -282,7 +282,7 @@ class Trainer:
                     episode_reward = 0
                     episode_count += 1
             else:
-                if terminated.any() or truncated.any():
+                if truncated.any():
                     with torch.no_grad():
                         states, infos = self.env.reset()
                 else:
@@ -462,7 +462,7 @@ class Trainer:
                     episode_reward = 0
                     episode_count += 1
             else:
-                if terminated.any() or truncated.any():
+                if truncated.any():
                     if episode_reward > best_episode_reward:
                         best_episode_reward = episode_reward
                     self._print_episode_log(episode_count, timestep, episode_reward, best_episode_reward)
@@ -501,7 +501,7 @@ class Trainer:
                 
 
         for timestep in tqdm.tqdm(
-            range(self.initial_timestep, self.timesteps), disable=self.disable_progressbar, file=sys.stdout
+            range(self.initial_timestep, self.timesteps), disable=self.disable_progressbar, file=sys.stdout, dynamic_ncols=True
         ):
 
             # pre-interaction

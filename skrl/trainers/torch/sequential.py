@@ -80,6 +80,9 @@ class SequentialTrainer(Trainer):
             self.agents.set_running_mode("train")
 
         # non-simultaneous agents
+        # if True:
+        #     self.multi_agent_train()
+        #     return
         if self.num_simultaneous_agents == 1:
             # single-agent
             if self.env.num_agents == 1:

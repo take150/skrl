@@ -293,7 +293,7 @@ class PPO(Agent):
             with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
                 values, _, _ = self.value.act({"states": self._state_preprocessor(states)}, role="value")
                 values = self._value_preprocessor(values, inverse=True)
-
+            
             # time-limit (truncation) bootstrapping
             if self._time_limit_bootstrap:
                 rewards += self._discount_factor * values * truncated

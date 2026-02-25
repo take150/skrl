@@ -315,7 +315,8 @@ class Agent:
             self._cumulative_timesteps.add_(1)
 
             # check ended episodes
-            finished_episodes = (terminated + truncated).nonzero(as_tuple=False)
+            finished_episodes = truncated.nonzero(as_tuple=False)
+            # finished_episodes = (terminated + truncated).nonzero(as_tuple=False)
             if finished_episodes.numel():
 
                 # storage cumulative rewards and timesteps
@@ -387,19 +388,39 @@ class Agent:
             modules = torch.load(path, map_location=self.device, weights_only=False)  # prevent torch:FutureWarning
         else:
             modules = torch.load(path, map_location=self.device)
+            
         if type(modules) is dict:
             for name, data in modules.items():
                 module = self.checkpoint_modules.get(name, None)
                 if module is not None:
-                    if hasattr(module, "load_state_dict"):
-                        module.load_state_dict(data)
+                    is_model = hasattr(module, "state_dict") and any(
+                        isinstance(v, (torch.Tensor, torch.nn.Parameter)) for v in data.values()
+                    )   
+                    if is_model:
+                        model_dict = module.state_dict()
+                        pretrained_dict_filtered = {
+                            k: v for k, v in data.items()  
+                            if k in model_dict and v.shape == model_dict[k].shape
+                        } 
+                        model_dict.update(pretrained_dict_filtered) 
+                        try:
+                            module.load_state_dict(model_dict)
+                        except RuntimeError as e:
+                            logger.warning(f"Error loading filtered state_dict for {name}: {e}")
+                            
                         if hasattr(module, "eval"):
-                            module.eval()
+                            module.eval()     
+                    elif hasattr(module, "load_state_dict"):
+                        try:
+                            module.load_state_dict(data) 
+                        except TypeError as e:
+                            logger.warning(f"Failed to load {name} (Optimizer/Other) due to argument mismatch: {e}")
+                        except Exception as e:
+                            logger.warning(f"Failed to load {name} (Optimizer/Other): {e}")
                     else:
                         raise NotImplementedError
                 else:
                     logger.warning(f"Cannot load the {name} module. The agent doesn't have such an instance")
-
     def migrate(
         self,
         path: str,
